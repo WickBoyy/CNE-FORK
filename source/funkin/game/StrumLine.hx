@@ -234,7 +234,20 @@ class StrumLine extends FlxTypedGroup<Strum>
 		__updateNote_songPos = Conductor.songPosition;
 		if (__updateNote_event == null)
 			__updateNote_event = PlayState.instance.__updateNote_event;
-		notes.forEach(updateNote);
+
+		var notesMembers = notes.members;
+		var i:Int = notes.length - 1;
+		var time:Float = __updateNote_songPos + notes.limit;
+
+		while (i >= 0)
+		{
+			var daNote = notesMembers[i--];
+			if (daNote == null || !daNote.exists)
+				continue;
+			if (daNote.strumTime > time)
+				break;
+			updateNote(daNote);
+		}
 	}
 
 	var __updateNote_strum:Strum;
@@ -299,31 +312,7 @@ class StrumLine extends FlxTypedGroup<Strum>
 	var __pressed:Array<Bool> = [];
 	var __justPressed:Array<Bool> = [];
 	var __justReleased:Array<Bool> = [];
-	var __notePerStrum:Array<Note> = [];
-
-	function __inputProcessPressed(note:Note) {
-		if (__pressed[note.strumID] && note.isSustainNote && note.strumTime < __updateNote_songPos && !note.wasGoodHit && note.sustainParent.wasGoodHit) {
-			PlayState.instance.goodNoteHit(this, note);
-		}
-	}
-
-	function __inputProcessJustPressed(note:Note)
-	{
-		if (__justPressed[note.strumID] && !note.isSustainNote && !note.wasGoodHit && note.canBeHit)
-		{
-			var cur = __notePerStrum[note.strumID];
-			var songPos = __updateNote_songPos;
-
-			var noteDist = Math.abs(note.strumTime - songPos);
-			var curDist = cur != null ? Math.abs(cur.strumTime - songPos) : 999999;
-
-			var notePenalty = note.avoid ? 1 : 0;
-			var curPenalty = (cur != null && cur.avoid) ? 1 : 0;
-
-			if (cur == null || notePenalty < curPenalty || (notePenalty == curPenalty && noteDist < curDist))
-				__notePerStrum[note.strumID] = note;
-		}
-	}
+	var __notePerStrum:haxe.ds.Vector<Note> = null;
 
 	/**
 	 * Updates the input for the strumline, and handles the input.
@@ -336,17 +325,28 @@ class StrumLine extends FlxTypedGroup<Strum>
 		if (cpu)
 			return;
 
-		if (__pressed.length != members.length) {
-			__pressed.resize(members.length);
-			__justPressed.resize(members.length);
-			__justReleased.resize(members.length);
+		var membersLen = members.length;
+		if (__pressed.length != membersLen) {
+			__pressed.resize(membersLen);
+			__justPressed.resize(membersLen);
+			__justReleased.resize(membersLen);
 		}
 
-		for (i in 0...members.length)
+		var anyPressed:Bool = false;
+		var anyJustPressed:Bool = false;
+
+		for (i in 0...membersLen)
 		{
-			__pressed[i] = members[i].__getPressed(this);
-			__justPressed[i] = members[i].__getJustPressed(this);
-			__justReleased[i] = members[i].__getJustReleased(this);
+			var str = members[i];
+			var p = str.__getPressed(this);
+			var jp = str.__getJustPressed(this);
+			var jr = str.__getJustReleased(this);
+			__pressed[i] = p;
+			__justPressed[i] = jp;
+			__justReleased[i] = jr;
+
+			if (p) anyPressed = true;
+			if (jp) anyJustPressed = true;
 		}
 
 		var event = EventManager.get(InputSystemEvent).recycle(__pressed, __justPressed, __justReleased, this, id);
@@ -359,30 +359,72 @@ class StrumLine extends FlxTypedGroup<Strum>
 		__justPressed = CoolUtil.getDefault(event.justPressed, []);
 		__justReleased = CoolUtil.getDefault(event.justReleased, []);
 
-		__notePerStrum = cast new haxe.ds.Vector(members.length); // [for(_ in 0...members.length) null];
+		anyPressed = false;
+		anyJustPressed = false;
+		for(p in __pressed) if(p) { anyPressed = true; break; }
+		if (anyPressed) for(p in __justPressed) if(p) { anyJustPressed = true; break; }
 
-		if (__pressed.contains(true)) {
-			if (__justPressed.contains(true)) {
-				notes.forEachAlive(__inputProcessJustPressed);
+		if (__notePerStrum == null || __notePerStrum.length != membersLen)
+			__notePerStrum = new haxe.ds.Vector(membersLen);
 
-				if (!ghostTapping) for (k => pr in __justPressed) if (pr && __notePerStrum[k] == null)
-					PlayState.instance.noteMiss(this, null, k, ID); // FUCK YOU
+		for(i in 0...membersLen) __notePerStrum[i] = null;
 
-				for (e in __notePerStrum)
-					if (e != null)
-						PlayState.instance.goodNoteHit(this, e);
+		if (anyPressed) {
+			var notesMembers = notes.members;
+			var notesLen = notes.length;
+			var timeLimit = __updateNote_songPos + notes.limit;
+
+			if (anyJustPressed) {
+				var i = notesLen - 1;
+				while(i >= 0) {
+					var note = notesMembers[i--];
+					if (note == null || !note.exists || !note.alive) continue;
+					if (note.strumTime > timeLimit) break;
+					
+					if (__justPressed[note.strumID] && !note.isSustainNote && !note.wasGoodHit && note.canBeHit)
+					{
+						var cur = __notePerStrum[note.strumID];
+						var songPos = __updateNote_songPos;
+
+						var noteDist = Math.abs(note.strumTime - songPos);
+						var curDist = cur != null ? Math.abs(cur.strumTime - songPos) : 999999;
+
+						var notePenalty = note.avoid ? 1 : 0;
+						var curPenalty = (cur != null && cur.avoid) ? 1 : 0;
+
+						if (cur == null || notePenalty < curPenalty || (notePenalty == curPenalty && noteDist < curDist))
+							__notePerStrum[note.strumID] = note;
+					}
+				}
+
+				if (!ghostTapping) for (k in 0...membersLen) if (__justPressed[k] && __notePerStrum[k] == null)
+					PlayState.instance.noteMiss(this, null, k, ID);
+
+				for (i in 0...membersLen) {
+					var e = __notePerStrum[i];
+					if (e != null) PlayState.instance.goodNoteHit(this, e);
+				}
 			}
 
 			for (c in characters)
 				if (c.lastAnimContext != DANCE)
 					c.__lockAnimThisFrame = true;
 
-			notes.forEachAlive(__inputProcessPressed);
+			var i = notesLen - 1;
+			while(i >= 0) {
+				var note = notesMembers[i--];
+				if (note == null || !note.exists || !note.alive) continue;
+				if (note.strumTime > timeLimit) break;
+				
+				if (__pressed[note.strumID] && note.isSustainNote && note.strumTime < __updateNote_songPos && !note.wasGoodHit && note.sustainParent.wasGoodHit) {
+					PlayState.instance.goodNoteHit(this, note);
+				}
+			}
 		}
 
-		forEach(function(str:Strum) {
-			str.updatePlayerInput(__pressed[str.ID], __justPressed[str.ID], __justReleased[str.ID]);
-		});
+		for(i in 0...membersLen)
+			members[i].updatePlayerInput(__pressed[i], __justPressed[i], __justReleased[i]);
+
 		PlayState.instance.gameAndCharsCall("onPostInputUpdate");
 	}
 
